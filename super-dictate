@@ -1,0 +1,126 @@
+#!/usr/bin/env python3
+import os
+import sys
+import subprocess
+import time
+import signal
+
+try:
+    import evdev
+    from evdev import UInput, ecodes as e
+except ImportError:
+    pass
+
+PID_FILE = "/tmp/super-dictate.pid"
+AUDIO_FILE = "/tmp/super-dictate-audio.wav"
+
+def notify(msg, icon="audio-input-microphone", expire=2000):
+    subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "SuperDictate", msg])
+
+def simulate_paste():
+    """Simula Ctrl+V usando un teclado virtual a nivel de kernel"""
+    try:
+        ui = UInput()
+        time.sleep(0.5) # Dar tiempo al SO para registrar el dispositivo
+        
+        # Press Left Ctrl
+        ui.write(e.EV_KEY, e.KEY_LEFTCTRL, 1)
+        ui.syn()
+        time.sleep(0.05)
+        
+        # Press Shift (para la terminal a veces es Ctrl+Shift+V)
+        ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1)
+        ui.syn()
+        time.sleep(0.05)
+        
+        # Press V
+        ui.write(e.EV_KEY, e.KEY_V, 1)
+        ui.syn()
+        time.sleep(0.05)
+        
+        # Release V
+        ui.write(e.EV_KEY, e.KEY_V, 0)
+        ui.syn()
+        time.sleep(0.05)
+        
+        # Release Shift
+        ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)
+        ui.syn()
+        
+        # Release Left Ctrl
+        ui.write(e.EV_KEY, e.KEY_LEFTCTRL, 0)
+        ui.syn()
+        
+        time.sleep(0.1)
+        ui.close()
+    except Exception as ex:
+        notify(f"❌ Error simulando pegado: {ex}", "dialog-error", 5000)
+
+def stop_and_transcribe():
+    try:
+        with open(PID_FILE, "r") as f:
+            pid = int(f.read().strip())
+        os.remove(PID_FILE)
+        os.kill(pid, signal.SIGINT) # kill softly so header is written
+        time.sleep(0.2)
+    except Exception:
+        pass
+    
+    notify("⏳ Procesando con IA...", "view-refresh", 5000)
+    
+    sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/stt/scripts'))
+    sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills'))
+    try:
+        from stt import transcribe
+        from shared_config import call_gemini
+        
+        # 1. Transcripción cruda rápida con Whisper local (sin ensuciar con prompts largos)
+        prompt_stt = "Rodrigo, TheIA, Entel, SuperDictate, Claude, Sherlock, Watson, Python, Linux."
+        res = transcribe(AUDIO_FILE, model_size="turbo", language="es", beam_size=1, initial_prompt=prompt_stt)
+        raw_text = res.get("text", "")
+        
+        if not raw_text or "error" in res:
+            notify(f"❌ Error o silencio: {res.get('error', 'Audio vacío')}", "dialog-error", 3000)
+            return
+            
+        # 2. Refinamiento inteligente con Gemini Flash en la nube (Rápido y 100% preciso)
+        prompt_llm = f"""Eres el motor de post-procesamiento de dictado de Rodrigo.
+El usuario dictó una frase, pero el motor Whisper cometió errores fonéticos.
+Corrige nombres propios del ecosistema (Watson, Sherlock, Claude, TheIA, Entel, SuperDictate, Rodrigo).
+Arregla la puntuación básica, pero MANTÉN el tono exacto. No agregues comillas, ni resumas, ni respondas nada más.
+Solo devuelve el texto arreglado.
+
+Texto crudo de Whisper:
+{raw_text}"""
+
+        refined_text = call_gemini(prompt_llm, model="gemini-3-flash-preview", temperature=0.1)
+        # Fallback si Gemini falla o se cae la red
+        text = refined_text.strip() if refined_text and "Error" not in refined_text else raw_text
+            
+        # 3. Copiar al portapapeles
+        proc = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
+        proc.communicate(text.encode("utf-8"))
+        
+        # 4. Pegar automáticamente con evdev
+        simulate_paste()
+        
+        notify(f"✅ Texto insertado", "emblem-default", 2000)
+            
+    except Exception as e:
+        notify(f"❌ Falla del sistema: {e}", "dialog-error")
+
+def start_recording():
+    proc = subprocess.Popen(
+        ["arecord", "-D", "default", "-f", "S16_LE", "-c", "1", "-r", "16000", AUDIO_FILE],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    with open(PID_FILE, "w") as f:
+        f.write(str(proc.pid))
+    notify("🔴 Escuchando...", "media-record", 10000)
+
+if __name__ == "__main__":
+    if os.path.exists(PID_FILE):
+        stop_and_transcribe()
+    else:
+        os.system("killall arecord 2>/dev/null")
+        start_recording()
