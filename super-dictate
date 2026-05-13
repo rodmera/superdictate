@@ -4,6 +4,8 @@ import sys
 import subprocess
 import time
 import signal
+import json
+from datetime import datetime
 
 try:
     import evdev
@@ -13,6 +15,22 @@ except ImportError:
 
 PID_FILE = "/tmp/super-dictate.pid"
 AUDIO_FILE = "/tmp/super-dictate-audio.wav"
+HISTORY_FILE = os.path.expanduser("~/.openclaw/workspace/memory/superdictate-history.jsonl")
+
+def log_history(raw_text, refined_text, is_cmd, cmd_type=None, cmd_args=None):
+    try:
+        record = {
+            "ts": datetime.now().isoformat(),
+            "raw": raw_text,
+            "refined": refined_text,
+            "is_command": is_cmd,
+            "command_type": cmd_type,
+            "command_args": cmd_args
+        }
+        with open(HISTORY_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
 
 def notify(msg, icon="audio-input-microphone", expire=2000):
     subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "SuperDictate", msg])
@@ -118,6 +136,14 @@ Texto dictado (con posibles errores fonéticos de Whisper): "{raw_text}" """
         
         if not res_json:
             raise Exception("Falla en API Gemini")
+            
+        log_history(
+            raw_text=raw_text,
+            refined_text=res_json.get("refined_text", ""),
+            is_cmd=res_json.get("is_command", False),
+            cmd_type=res_json.get("command_type"),
+            cmd_args=res_json.get("command_args")
+        )
             
         # 3. Ejecución
         if res_json.get("is_command"):
