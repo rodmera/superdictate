@@ -61,50 +61,133 @@ def stop_and_transcribe():
         with open(PID_FILE, "r") as f:
             pid = int(f.read().strip())
         os.remove(PID_FILE)
-        os.kill(pid, signal.SIGINT) # kill softly so header is written
+        os.kill(pid, signal.SIGINT)
         time.sleep(0.2)
     except Exception:
         pass
     
-    notify("⏳ Procesando con IA...", "view-refresh", 5000)
+    notify("⏳ Procesando...", "view-refresh", 5000)
     
     sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/stt/scripts'))
     sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills'))
+    
     try:
         from stt import transcribe
-        from shared_config import call_gemini
+        from shared_config import call_gemini_structured
         
-        # 1. Transcripción cruda rápida con Whisper local (sin ensuciar con prompts largos)
-        prompt_stt = "Rodrigo, TheIA, Entel, SuperDictate, Claude, Sherlock, Watson, Python, Linux."
-        res = transcribe(AUDIO_FILE, model_size="turbo", language="es", beam_size=1, initial_prompt=prompt_stt)
+        # 1. Transcripción cruda rápida con Whisper local
+        prompt_stt = "Abre el proyecto, abre el vault, recuérdame, dile a Sherlock, CreaEfecto, TheIA."
+        res = transcribe(AUDIO_FILE, model_size="turbo", language="es", beam_size=5, initial_prompt=prompt_stt)
         raw_text = res.get("text", "")
         
         if not raw_text or "error" in res:
             notify(f"❌ Error o silencio: {res.get('error', 'Audio vacío')}", "dialog-error", 3000)
             return
             
-        # 2. Refinamiento inteligente con Gemini Flash en la nube (Rápido y 100% preciso)
-        prompt_llm = f"""Eres el motor de post-procesamiento de dictado de Rodrigo.
-El usuario dictó una frase, pero el motor Whisper cometió errores fonéticos.
-Corrige nombres propios del ecosistema (Watson, Sherlock, Claude, TheIA, Entel, SuperDictate, Rodrigo).
-Arregla la puntuación básica, pero MANTÉN el tono exacto. No agregues comillas, ni resumas, ni respondas nada más.
-Solo devuelve el texto arreglado.
+        # 2. Análisis de Intención (Enrutamiento) con Gemini Flash
+        schema = {
+            "type": "OBJECT",
+            "properties": {
+                "is_command": {
+                    "type": "BOOLEAN",
+                    "description": "¿El usuario está dando una orden al computador (ej. 'abre X', 'recuérdame Y', 'dile a Sherlock Z')?"
+                },
+                "command_type": {
+                    "type": "STRING",
+                    "description": "Si is_command=true, elige: 'open_project', 'open_vault', 'add_todo', 'ask_sherlock', 'search_vault'. Si no, vacio."
+                },
+                "command_args": {
+                    "type": "STRING",
+                    "description": "Argumento de la orden (ej: nombre del proyecto 'theia-landing', nombre de la tarea, o el mensaje para sherlock)."
+                },
+                "refined_text": {
+                    "type": "STRING",
+                    "description": "Si is_command=false, este es el texto corregido fonéticamente para pegar. Corrige (Watson, Sherlock, Claude, TheIA, Entel, SuperDictate, Rodrigo). Mantén el tono exacto."
+                }
+            },
+            "required": ["is_command"]
+        }
 
-Texto crudo de Whisper:
-{raw_text}"""
+        prompt_llm = f"""Eres el cerebro de SuperDictate. Analiza lo que el usuario acaba de decir por micrófono y decide si es un dictado de texto pasivo, o una orden/comando activo para ejecutar en el computador.
+Si la intención del usuario es pedirle a la máquina que haga algo (como "Abre el vault", "busca en mis notas X", "recuérdame hacer y", "dile a sherlock que z"), DEBES marcar is_command=true.
+Si es solo una frase suelta ("hola cómo estás", "este es un texto de prueba"), DEBES marcar is_command=false.
 
-        refined_text = call_gemini(prompt_llm, model="gemini-3-flash-preview", temperature=0.1)
-        # Fallback si Gemini falla o se cae la red
-        text = refined_text.strip() if refined_text and "Error" not in refined_text else raw_text
+Texto dictado (con posibles errores fonéticos de Whisper): "{raw_text}" """
+
+        res_json = call_gemini_structured(prompt_llm, schema, model="gemini-3-flash-preview", temperature=0.1)
+        
+        if not res_json:
+            raise Exception("Falla en API Gemini")
             
-        # 3. Copiar al portapapeles
-        proc = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
-        proc.communicate(text.encode("utf-8"))
-        
-        # 4. Pegar automáticamente con evdev
-        simulate_paste()
-        
-        notify(f"✅ Texto insertado", "emblem-default", 2000)
+        # 3. Ejecución
+        if res_json.get("is_command"):
+            cmd = res_json.get("command_type")
+            arg = res_json.get("command_args", "")
+            
+            if cmd == "open_vault":
+                subprocess.Popen(["xdg-open", "obsidian://open"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                notify("📖 Abriendo Vault...", "emblem-default")
+                
+            elif cmd == "add_todo":
+                sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/todoist/scripts'))
+                from todoist import add_task
+                add_task(arg, due_string="today", project_name="Inbox")
+                notify(f"✅ Tarea añadida a Todoist:\n{arg}", "emblem-default", 4000)
+                
+            elif cmd == "search_vault":
+                notify(f"🔍 Buscando en tus notas:\n{arg}", "emblem-default", 4000)
+                sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/obsidian-qa/scripts'))
+                from vault_qa import ask_vault
+                
+                # Ejecutar RAG sobre el vault
+                ans = ask_vault(arg, top_k=3)
+                answer_text = ans.get('answer', 'No encontré nada relevante.')
+                
+                # En Linux, las notificaciones muy largas se cortan, usamos un popup gráfico ligero (zenity)
+                # O si no está zenity, guardamos en archivo temporal y abrimos en editor
+                try:
+                    # Envolver zenity para que no bloquee el script
+                    subprocess.Popen(['zenity', '--info', '--title', f'Resultados: {arg}', '--text', answer_text, '--width=600', '--height=400'])
+                except FileNotFoundError:
+                    # Fallback si no tiene zenity
+                    tmp_ans = f"/tmp/vault_ans_{int(time.time())}.txt"
+                    with open(tmp_ans, "w") as f:
+                        f.write(f"Búsqueda: {arg}\n\n{answer_text}")
+                    subprocess.Popen(["xdg-open", tmp_ans])
+                
+            elif cmd == "ask_sherlock":
+                subprocess.Popen([
+                    "openclaw", "agent", "--to", "+56977298344", "--message", arg
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                notify(f"🕵️ Mensaje enviado a Sherlock:\n{arg}", "emblem-default", 4000)
+                
+            elif cmd == "open_project":
+                projects_dir = os.path.expanduser("~/projects")
+                found = False
+                for p in sorted(os.listdir(projects_dir), key=len): # Buscar match más corto primero para evitar falsos positivos largos
+                    # Buscamos si la palabra clave está en el nombre de la carpeta
+                    arg_clean = arg.lower().replace(" ", "").replace("-", "")
+                    p_clean = p.lower().replace("-", "")
+                    if arg_clean and arg_clean in p_clean:
+                        subprocess.Popen(["xdg-open", os.path.join(projects_dir, p)], 
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, 
+                                         start_new_session=True)
+                        notify(f"📂 Proyecto abierto: {p}", "emblem-default")
+                        found = True
+                        break
+                if not found:
+                    notify(f"❌ Proyecto no encontrado: {arg}", "dialog-error")
+            else:
+                notify(f"❓ Comando no reconocido: {cmd}", "dialog-warning")
+        else:
+            # Flujo normal de dictado
+            final_text = res_json.get("refined_text", raw_text)
+            
+            proc = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
+            proc.communicate(final_text.encode("utf-8"))
+            
+            simulate_paste()
+            notify(f"✅ Texto insertado", "emblem-default", 2000)
             
     except Exception as e:
         notify(f"❌ Falla del sistema: {e}", "dialog-error")
