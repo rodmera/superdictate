@@ -121,7 +121,7 @@ def stop_and_transcribe():
                 },
                 "refined_text": {
                     "type": "STRING",
-                    "description": "Si is_command=false, este es el texto final para pegar. Corrige posibles malas transcripciones fonéticas (ej. 'pues' por 'esto es') basándote en la gramática. Corrige ecosistema (Watson, Sherlock, Claude, TheIA, Entel, SuperDictate, Rodrigo). Mantén el tono."
+                    "description": "Si is_command=false, este es el texto final para pegar. Corrige posibles malas transcripciones fonéticas basándote en la gramática. Corrige ecosistema (Watson, Sherlock, Claude, TheIA, Entel, SuperDictate). IMPORTANTE: Si el usuario enumera elementos (ej. 'uno comprar leche, dos huevos', 'primero esto, segundo esto'), formatea el texto automáticamente como una lista con viñetas o lista numerada, usando saltos de línea reales."
                 }
             },
             "required": ["is_command"]
