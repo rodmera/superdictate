@@ -96,8 +96,7 @@ def stop_and_transcribe():
         from shared_config import call_gemini_structured
         
         # 1. Transcripción cruda rápida con Whisper local
-        prompt_stt = "Abre el proyecto, abre el vault, recuérdame, dile a Sherlock, CreaEfecto, TheIA."
-        res = transcribe(AUDIO_FILE, model_size="turbo", language="es", beam_size=5, initial_prompt=prompt_stt)
+        res = transcribe(AUDIO_FILE, model_size="turbo", language="es", beam_size=5)
         raw_text = res.get("text", "")
         
         if not raw_text or "error" in res:
@@ -122,7 +121,7 @@ def stop_and_transcribe():
                 },
                 "refined_text": {
                     "type": "STRING",
-                    "description": "Si is_command=false, este es el texto corregido fonéticamente para pegar. Corrige (Watson, Sherlock, Claude, TheIA, Entel, SuperDictate, Rodrigo). Mantén el tono exacto."
+                    "description": "Si is_command=false, este es el texto final para pegar. Corrige posibles malas transcripciones fonéticas (ej. 'pues' por 'esto es') basándote en la gramática. Corrige ecosistema (Watson, Sherlock, Claude, TheIA, Entel, SuperDictate, Rodrigo). Mantén el tono."
                 }
             },
             "required": ["is_command"]
