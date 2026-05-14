@@ -2,4 +2,4 @@ __pycache__/
 *.wav
 *.pid
 .env
-EOF 2>&1
+config.json

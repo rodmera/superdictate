@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "default_mode": "default",
     "silence_timeout": None,
     "ptt_key": "KEY_F9",
+    "sherlock_to": "",
     "vocabulary": [],
     "modes": {
         "default": {
@@ -384,11 +385,15 @@ def stop_and_transcribe():
                     subprocess.Popen(["xdg-open", tmp_ans])
 
             elif cmd == "ask_sherlock":
-                subprocess.Popen(
-                    ["openclaw", "agent", "--to", "+56977298344", "--message", arg],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-                )
-                notify(f"Mensaje enviado a Sherlock:\n{arg}", "emblem-default", 4000)
+                sherlock_to = config.get("sherlock_to", "")
+                if not sherlock_to:
+                    notify("sherlock_to no configurado en config.json", "dialog-error", 4000)
+                else:
+                    subprocess.Popen(
+                        ["openclaw", "agent", "--to", sherlock_to, "--message", arg],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                    )
+                    notify(f"Mensaje enviado a Sherlock:\n{arg}", "emblem-default", 4000)
 
             elif cmd == "open_project":
                 projects_dir = os.path.expanduser("~/projects")
