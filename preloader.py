@@ -43,7 +43,13 @@ def main():
             pass
 
         # Fase 3 — transcribir (modelo ya en memoria, rápido)
-        result = transcribe(AUDIO_FILE, model_size='turbo', language='es', beam_size=5)
+        language = 'es'
+        try:
+            with open('/tmp/super-dictate-lang') as f:
+                language = f.read().strip()
+        except FileNotFoundError:
+            pass
+        result = transcribe(AUDIO_FILE, model_size='turbo', language=language, beam_size=5)
 
         with open(RESULT_FILE, 'w', encoding='utf-8') as f:
             json.dump(result, f, ensure_ascii=False)

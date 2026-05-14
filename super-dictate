@@ -6,6 +6,7 @@ import subprocess
 import time
 import signal
 import json
+import argparse
 from datetime import datetime
 
 try:
@@ -15,23 +16,74 @@ try:
 except ImportError:
     EVDEV_AVAILABLE = False
 
-PID_FILE = "/tmp/super-dictate.pid"
-AUDIO_FILE    = "/tmp/super-dictate-audio.wav"
-RESULT_FILE   = "/tmp/super-dictate-transcription.json"
-READY_FILE    = "/tmp/super-dictate-audio-ready"
-MODEL_READY   = "/tmp/super-dictate-model-ready"
-HISTORY_FILE  = os.path.expanduser("~/.openclaw/workspace/memory/superdictate-history.jsonl")
+PID_FILE     = "/tmp/super-dictate.pid"
+AUDIO_FILE   = "/tmp/super-dictate-audio.wav"
+RESULT_FILE  = "/tmp/super-dictate-transcription.json"
+READY_FILE   = "/tmp/super-dictate-audio-ready"
+MODEL_READY  = "/tmp/super-dictate-model-ready"
+MODE_FILE    = "/tmp/super-dictate-mode"
+LANG_FILE    = "/tmp/super-dictate-lang"
+HISTORY_FILE = os.path.expanduser("~/.openclaw/workspace/memory/superdictate-history.jsonl")
+CONFIG_FILE  = os.path.expanduser("~/.config/superdictate/config.json")
 
-# Fix #3: crear directorio del historial si no existe
 os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+
+DEFAULT_CONFIG = {
+    "language": "es",
+    "default_mode": "default",
+    "vocabulary": [],
+    "modes": {
+        "default": {
+            "name": "Default",
+            "prompt": ""
+        },
+        "email": {
+            "name": "Email",
+            "prompt": "Formatea el texto como un email profesional con saludo y despedida apropiados. Párrafos bien estructurados."
+        },
+        "chat": {
+            "name": "Chat",
+            "prompt": "Tono casual y breve, como un mensaje de WhatsApp o Slack. Sin puntuación excesiva."
+        },
+        "formal": {
+            "name": "Formal",
+            "prompt": "Lenguaje técnico y profesional. Oraciones completas y bien estructuradas."
+        },
+        "notes": {
+            "name": "Notas",
+            "prompt": "Formatea como bullet points con estructura clara y concisa."
+        }
+    }
+}
 
 
-def log_history(raw_text, refined_text, is_cmd, cmd_type=None, cmd_args=None):
+def load_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, encoding='utf-8') as f:
+                cfg = json.load(f)
+            for key, val in DEFAULT_CONFIG.items():
+                if key not in cfg:
+                    cfg[key] = val
+            return cfg
+        except Exception:
+            pass
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(DEFAULT_CONFIG, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+    return DEFAULT_CONFIG.copy()
+
+
+def log_history(raw_text, refined_text, is_cmd, mode=None, cmd_type=None, cmd_args=None):
     try:
         record = {
             "ts": datetime.now().isoformat(),
             "raw": raw_text,
             "refined": refined_text,
+            "mode": mode,
             "is_command": is_cmd,
             "command_type": cmd_type,
             "command_args": cmd_args
@@ -48,13 +100,12 @@ def notify(msg, icon="audio-input-microphone", expire=2000):
 
 def simulate_paste():
     """Simula Ctrl+Shift+V via teclado virtual a nivel de kernel (funciona en terminales)."""
-    # Fix #1: fallar con mensaje claro si evdev no está instalado
     if not EVDEV_AVAILABLE:
         notify("evdev no instalado. Ejecuta: pip install evdev", "dialog-error", 5000)
         return
     try:
         ui = UInput()
-        time.sleep(0.5)  # tiempo para que el SO registre el dispositivo
+        time.sleep(0.5)
 
         ui.write(e.EV_KEY, e.KEY_LEFTCTRL, 1);  ui.syn(); time.sleep(0.05)
         ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1); ui.syn(); time.sleep(0.05)
@@ -70,12 +121,7 @@ def simulate_paste():
 
 
 def _find_project(arg, projects_dir):
-    """Fix #7: matching por tokens en vez de substring libre.
-
-    Tokeniza por espacios/guiones/underscores. Requiere mínimo 3 chars por token
-    y que el token sea exacto o (si >= 4 chars) sea prefijo de un token de la carpeta.
-    Evita que "the" matchee "theia", "leather", etc.
-    """
+    """Matching por tokens en vez de substring libre."""
     arg_tokens = [t for t in re.split(r'[\s\-_]+', arg.lower()) if len(t) >= 3]
     if not arg_tokens:
         return None
@@ -86,7 +132,6 @@ def _find_project(arg, projects_dir):
         folder_tokens = re.split(r'[\s\-_]+', folder.lower())
         for at in arg_tokens:
             for ft in folder_tokens:
-                # Exacto, o prefijo de al menos 4 chars
                 if at == ft or (len(at) >= 4 and ft.startswith(at)):
                     return folder
     return None
@@ -94,7 +139,6 @@ def _find_project(arg, projects_dir):
 
 def _read_preloader_result(timeout=30):
     """Espera el resultado del pre-loader (max timeout segundos). Retorna dict o None."""
-    # Señalizar al pre-loader que el audio está listo para transcribir
     open(READY_FILE, 'w').close()
 
     deadline = time.time() + timeout
@@ -109,7 +153,6 @@ def _read_preloader_result(timeout=30):
                 break
         time.sleep(0.05)
 
-    # Limpiar señal si el pre-loader no respondió
     try:
         os.remove(READY_FILE)
     except FileNotFoundError:
@@ -118,7 +161,6 @@ def _read_preloader_result(timeout=30):
 
 
 def stop_and_transcribe():
-    # Fix #2: limpiar PID en finally para evitar archivos huérfanos
     pid = None
     try:
         with open(PID_FILE, "r") as f:
@@ -133,13 +175,35 @@ def stop_and_transcribe():
 
     if pid:
         try:
-            os.kill(pid, 0)   # verifica que el proceso existe antes de matar
+            os.kill(pid, 0)
             os.kill(pid, signal.SIGINT)
         except ProcessLookupError:
-            pass  # ya terminó
+            pass
 
     os.system("pkill -f 'indicator.py'")
     time.sleep(0.2)
+
+    # Leer modo e idioma guardados al iniciar grabación
+    mode_key = "default"
+    language = "es"
+    try:
+        with open(MODE_FILE) as f:
+            mode_key = f.read().strip()
+        os.remove(MODE_FILE)
+    except FileNotFoundError:
+        pass
+    try:
+        with open(LANG_FILE) as f:
+            language = f.read().strip()
+        os.remove(LANG_FILE)
+    except FileNotFoundError:
+        pass
+
+    config = load_config()
+    vocabulary = config.get("vocabulary", [])
+    mode = config.get("modes", {}).get(mode_key, {})
+    mode_name = mode.get("name", mode_key)
+    mode_prompt = mode.get("prompt", "")
 
     notify("Procesando...", "view-refresh", 5000)
 
@@ -149,14 +213,13 @@ def stop_and_transcribe():
     try:
         from shared_config import call_gemini_structured
 
-        # 1. Transcripción — usar resultado del pre-loader si está disponible
+        # 1. Transcripción
         res = _read_preloader_result()
         if res is None:
-            # Fallback: transcribir en el proceso actual (cold start)
             try:
                 sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/stt/scripts'))
                 from stt import transcribe
-                res = transcribe(AUDIO_FILE, model_size="turbo", language="es", beam_size=5)
+                res = transcribe(AUDIO_FILE, model_size="turbo", language=language, beam_size=5)
             except Exception as transcribe_err:
                 notify(f"Error en transcripcion: {transcribe_err}", "dialog-error", 4000)
                 return
@@ -167,6 +230,12 @@ def stop_and_transcribe():
             return
 
         # 2. Análisis de intención con Gemini Flash
+        vocab_hint = (
+            f" Vocabulario específico del usuario (respetar exactamente): {', '.join(vocabulary)}."
+            if vocabulary else ""
+        )
+        mode_hint = f" {mode_prompt}" if mode_prompt else ""
+
         schema = {
             "type": "OBJECT",
             "properties": {
@@ -176,7 +245,7 @@ def stop_and_transcribe():
                 },
                 "command_type": {
                     "type": "STRING",
-                    "description": "Si is_command=true, elige: 'open_project', 'open_vault', 'add_todo', 'ask_sherlock', 'search_vault'. Si no, vacio."
+                    "description": "Si is_command=true, elige: 'open_project', 'open_vault', 'add_todo', 'ask_sherlock', 'search_vault'. Si no, vacío."
                 },
                 "command_args": {
                     "type": "STRING",
@@ -184,17 +253,23 @@ def stop_and_transcribe():
                 },
                 "refined_text": {
                     "type": "STRING",
-                    "description": "Si is_command=false, texto final para pegar. Corrige errores fonéticos de Whisper y nombres propios (Watson, Sherlock, Claude, TheIA, Entel, SuperDictate). Si el usuario enumera elementos, formatea como lista con saltos de línea reales."
+                    "description": (
+                        f"Si is_command=false, texto final para pegar. Corrige errores fonéticos de Whisper y nombres propios "
+                        f"(Watson, Sherlock, Claude, TheIA, Entel, SuperDictate).{vocab_hint} "
+                        f"Si el usuario enumera elementos, formatea como lista con saltos de línea reales.{mode_hint}"
+                    )
                 }
             },
             "required": ["is_command"]
         }
 
-        prompt_llm = f"""Eres el cerebro de SuperDictate. Decide si el texto es un dictado pasivo o una orden activa.
-Si el usuario pide a la máquina que haga algo ("Abre el vault", "busca en mis notas X", "recuérdame Y", "dile a Sherlock Z"), marca is_command=true.
-Si es texto para pegar ("hola cómo estás", "este es un texto de prueba"), marca is_command=false.
-
-Texto dictado (puede tener errores fonéticos de Whisper): "{raw_text}" """
+        prompt_llm = (
+            f"Eres el cerebro de SuperDictate. Decide si el texto es un dictado pasivo o una orden activa.\n"
+            f"Si el usuario pide a la máquina que haga algo (\"Abre el vault\", \"busca en mis notas X\", "
+            f"\"recuérdame Y\", \"dile a Sherlock Z\"), marca is_command=true.\n"
+            f"Si es texto para pegar, marca is_command=false.\n\n"
+            f"Texto dictado (puede tener errores fonéticos de Whisper): \"{raw_text}\""
+        )
 
         res_json = call_gemini_structured(prompt_llm, schema, model="gemini-3-flash-preview",
                                           temperature=0.1, timeout=45)
@@ -205,6 +280,7 @@ Texto dictado (puede tener errores fonéticos de Whisper): "{raw_text}" """
             raw_text=raw_text,
             refined_text=res_json.get("refined_text", ""),
             is_cmd=res_json.get("is_command", False),
+            mode=mode_key,
             cmd_type=res_json.get("command_type"),
             cmd_args=res_json.get("command_args")
         )
@@ -230,7 +306,6 @@ Texto dictado (puede tener errores fonéticos de Whisper): "{raw_text}" """
                 sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/obsidian-qa/scripts'))
                 from vault_qa import ask_sources
 
-                # Fix #8 (ask_sources): validar respuesta antes de usar
                 try:
                     ans = ask_sources(arg, sources=['vault', 'personal'], top_k=3)
                     answer_text = ans.get('answer', 'No encontre nada relevante.') if isinstance(ans, dict) else str(ans)
@@ -243,7 +318,6 @@ Texto dictado (puede tener errores fonéticos de Whisper): "{raw_text}" """
                                       '--text', answer_text,
                                       '--width=600', '--height=400'])
                 except FileNotFoundError:
-                    # Fix #6: nombre fijo en /tmp, se sobreescribe en cada uso
                     tmp_ans = "/tmp/superdictate-vault-answer.txt"
                     with open(tmp_ans, "w") as fh:
                         fh.write(f"Busqueda: {arg}\n\n{answer_text}")
@@ -258,7 +332,6 @@ Texto dictado (puede tener errores fonéticos de Whisper): "{raw_text}" """
 
             elif cmd == "open_project":
                 projects_dir = os.path.expanduser("~/projects")
-                # Fix #7: matching por tokens, no por substring
                 folder = _find_project(arg, projects_dir)
                 if folder:
                     subprocess.Popen(
@@ -273,10 +346,8 @@ Texto dictado (puede tener errores fonéticos de Whisper): "{raw_text}" """
                 notify(f"Comando no reconocido: {cmd}", "dialog-warning")
 
         else:
-            # Dictado pasivo: copiar al portapapeles y pegar
             final_text = res_json.get("refined_text", raw_text)
 
-            # Fix #4: verificar que wl-copy funcionó antes de intentar pegar
             proc = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
             proc.communicate(final_text.encode("utf-8"))
             if proc.returncode != 0:
@@ -284,13 +355,23 @@ Texto dictado (puede tener errores fonéticos de Whisper): "{raw_text}" """
                 return
 
             simulate_paste()
-            notify("Texto insertado", "emblem-default", 2000)
+            notify(f"Texto insertado [{mode_name}]", "emblem-default", 2000)
 
     except Exception as err:
         notify(f"Falla del sistema: {err}", "dialog-error", 5000)
 
 
-def start_recording():
+def start_recording(mode_override=None):
+    config = load_config()
+    mode_key = mode_override or config.get("default_mode", "default")
+    language = config.get("language", "es")
+
+    # Persistir para la fase de stop
+    with open(MODE_FILE, 'w') as f:
+        f.write(mode_key)
+    with open(LANG_FILE, 'w') as f:
+        f.write(language)
+
     # Limpiar archivos residuales de sesiones anteriores
     for f in (RESULT_FILE, READY_FILE, MODEL_READY):
         try:
@@ -305,7 +386,6 @@ def start_recording():
     with open(PID_FILE, "w") as f:
         f.write(str(proc.pid))
 
-    # Pre-cargar Whisper en background mientras el usuario habla
     preloader_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "preloader.py")
     if os.path.exists(preloader_path):
         subprocess.Popen([sys.executable, preloader_path],
@@ -315,12 +395,17 @@ def start_recording():
     subprocess.Popen([sys.executable, indicator_path],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    notify("Escuchando...", "media-record", 10000)
+    mode_name = config.get("modes", {}).get(mode_key, {}).get("name", mode_key)
+    notify(f"Escuchando... [{mode_name}]", "media-record", 10000)
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", default=None, help="Modo de dictado (default, email, chat, formal, notes)")
+    args = parser.parse_args()
+
     if os.path.exists(PID_FILE):
         stop_and_transcribe()
     else:
         os.system("killall arecord 2>/dev/null")
-        start_recording()
+        start_recording(mode_override=args.mode)

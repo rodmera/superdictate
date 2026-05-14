@@ -24,6 +24,17 @@ sandboxing y haría el keystroke injection más difícil.
 
 **Esfuerzo estimado:** 2-3 horas.
 
+## Configuración
+
+Config en `~/.config/superdictate/config.json` (se crea automáticamente al primer uso):
+- `language`: idioma para Whisper (ej. "es", "en", "pt"). Pasa al pre-loader vía `/tmp/super-dictate-lang`.
+- `default_mode`: modo por defecto si no se pasa `--mode`.
+- `vocabulary`: lista de términos propios inyectados al prompt de Gemini (nombres, siglas, marcas).
+- `modes`: dict de modos. Cada modo tiene `name` y `prompt` que se añade al prompt de refined_text.
+
+Para agregar un modo custom, editar el JSON y añadir una clave nueva bajo `modes`.
+Los modos se activan con `--mode <clave>` o se configuran como `default_mode`.
+
 ## Arquitectura — Pre-loader
 
 - `preloader.py` corre en background desde la primera pulsación

@@ -16,12 +16,36 @@ SuperDictate is a Linux-native, Wayland-compatible smart dictation tool. It uses
 - `/dev/uinput` permissions for the user
 
 ## Features
-- **Smart Dictation:** Trigger and talk. It fixes bad Whisper transcriptions like "Watson" or "CreaEfecto".
+- **Smart Dictation:** Trigger and talk. It fixes phonetic Whisper errors and your custom vocabulary.
+- **Modes:** Different prompts for different contexts — email, chat, formal, notes, or fully custom.
+- **Custom Vocabulary:** Define your own terms (names, acronyms, brands) in the config file.
+- **Multi-language:** Set any language supported by Whisper in the config file.
 - **Project Navigation:** *"Abre el proyecto CreaEfecto"*
 - **Obsidian Vault:** *"Abre el vault"*
 - **RAG Search:** *"Busca en mis notas sobre TheIA"* (Uses the `ask_sources` RAG pipeline across Obsidian vault + personal documents, shows a Zenity popup with the AI's answer).
 - **Todoist Tasks:** *"Recuérdame llamar a cliente mañana"*
 - **OpenClaw (Sherlock):** *"Dile a Sherlock que revise mi correo"*
+
+## Configuration
+
+On first run, a config file is created at `~/.config/superdictate/config.json`:
+
+```json
+{
+  "language": "es",
+  "default_mode": "default",
+  "vocabulary": ["TheIA", "PLAI", "CreaEfecto"],
+  "modes": {
+    "default": { "name": "Default", "prompt": "" },
+    "email":   { "name": "Email",   "prompt": "Formatea el texto como un email profesional..." },
+    "chat":    { "name": "Chat",    "prompt": "Tono casual y breve, como un mensaje de WhatsApp..." },
+    "formal":  { "name": "Formal",  "prompt": "Lenguaje técnico y profesional..." },
+    "notes":   { "name": "Notas",   "prompt": "Formatea como bullet points..." }
+  }
+}
+```
+
+You can add your own modes or edit the prompts freely. Use `--mode <name>` to activate a specific mode, or set `default_mode` in the config.
 
 ## Architecture
 
@@ -43,6 +67,13 @@ Second press ──► arecord stops           ──► signals preloader via R
 Total latency from second press to paste: ~10s on CPU (vs ~14s without pre-loader).
 
 ## Usage
-Trigger the script via a custom keyboard shortcut (e.g., `Alt+Z`). 
+Trigger the script via a custom keyboard shortcut (e.g., `Alt+Z`).
 - First press: Starts recording (🔴) and pre-loads the Whisper model in background.
 - Second press: Stops, transcribes, routes, and executes/pastes the text (⏳ -> ✅).
+
+To use a specific mode, pass `--mode` when binding the shortcut:
+```bash
+super-dictate --mode email
+super-dictate --mode chat
+super-dictate --mode formal
+```
