@@ -24,6 +24,27 @@ sandboxing y haría el keystroke injection más difícil.
 
 **Esfuerzo estimado:** 2-3 horas.
 
+## Features implementadas
+
+| Feature | Cómo activar |
+|---|---|
+| Modo raw (bypass Gemini) | `--mode raw` |
+| Modo vault (guardar en Obsidian) | `--mode vault` — llama `capture_note()` del skill obsidian-capture |
+| Append al portapapeles | `--append` — lee `wl-paste` y prepende al texto final |
+| Historial | `--history [N]` — imprime en terminal las últimas N entradas del JSONL |
+| Auto-stop por silencio | `silence_timeout: N` en config — usa sox + silence_watcher.py |
+| Push-to-talk | `ptt.py` daemon — monitorea tecla configurable con evdev |
+
+## Archivos del proyecto
+
+| Archivo | Función |
+|---|---|
+| `super-dictate` | Script principal |
+| `preloader.py` | Pre-carga Whisper en background |
+| `silence_watcher.py` | Monitorea PID de sox y dispara stop cuando termina |
+| `ptt.py` | Daemon push-to-talk |
+| `indicator.py` | Icono de tray mientras graba |
+
 ## Configuración
 
 Config en `~/.config/superdictate/config.json` (se crea automáticamente al primer uso):

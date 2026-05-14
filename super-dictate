@@ -23,6 +23,7 @@ READY_FILE   = "/tmp/super-dictate-audio-ready"
 MODEL_READY  = "/tmp/super-dictate-model-ready"
 MODE_FILE    = "/tmp/super-dictate-mode"
 LANG_FILE    = "/tmp/super-dictate-lang"
+APPEND_FILE  = "/tmp/super-dictate-append"
 HISTORY_FILE = os.path.expanduser("~/.openclaw/workspace/memory/superdictate-history.jsonl")
 CONFIG_FILE  = os.path.expanduser("~/.config/superdictate/config.json")
 
@@ -32,10 +33,16 @@ os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
 DEFAULT_CONFIG = {
     "language": "es",
     "default_mode": "default",
+    "silence_timeout": None,
+    "ptt_key": "KEY_F9",
     "vocabulary": [],
     "modes": {
         "default": {
             "name": "Default",
+            "prompt": ""
+        },
+        "raw": {
+            "name": "Raw",
             "prompt": ""
         },
         "email": {
@@ -53,6 +60,10 @@ DEFAULT_CONFIG = {
         "notes": {
             "name": "Notas",
             "prompt": "Formatea como bullet points con estructura clara y concisa."
+        },
+        "vault": {
+            "name": "Vault",
+            "prompt": ""
         }
     }
 }
@@ -92,6 +103,24 @@ def log_history(raw_text, refined_text, is_cmd, mode=None, cmd_type=None, cmd_ar
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception:
         pass
+
+
+def show_history(n=10):
+    try:
+        with open(HISTORY_FILE, encoding='utf-8') as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        print("Sin historial todavía.")
+        return
+    records = [json.loads(l) for l in lines if l.strip()]
+    for r in reversed(records[-n:]):
+        ts = r.get('ts', '')[:16].replace('T', ' ')
+        mode = r.get('mode') or 'default'
+        if r.get('is_command'):
+            print(f"[{ts}] [{mode}] CMD:{r.get('command_type')} — {r.get('command_args', '')}")
+        else:
+            text = (r.get('refined') or r.get('raw', ''))[:100]
+            print(f"[{ts}] [{mode}] {text}")
 
 
 def notify(msg, icon="audio-input-microphone", expire=2000):
@@ -160,6 +189,12 @@ def _read_preloader_result(timeout=30):
     return None
 
 
+def _copy_to_clipboard(text):
+    proc = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
+    proc.communicate(text.encode("utf-8"))
+    return proc.returncode == 0
+
+
 def stop_and_transcribe():
     pid = None
     try:
@@ -183,9 +218,10 @@ def stop_and_transcribe():
     os.system("pkill -f 'indicator.py'")
     time.sleep(0.2)
 
-    # Leer modo e idioma guardados al iniciar grabación
+    # Leer estado persistido al iniciar grabación
     mode_key = "default"
     language = "es"
+    append_mode = os.path.exists(APPEND_FILE)
     try:
         with open(MODE_FILE) as f:
             mode_key = f.read().strip()
@@ -196,6 +232,10 @@ def stop_and_transcribe():
         with open(LANG_FILE) as f:
             language = f.read().strip()
         os.remove(LANG_FILE)
+    except FileNotFoundError:
+        pass
+    try:
+        os.remove(APPEND_FILE)
     except FileNotFoundError:
         pass
 
@@ -211,13 +251,10 @@ def stop_and_transcribe():
     sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills'))
 
     try:
-        from shared_config import call_gemini_structured
-
         # 1. Transcripción
         res = _read_preloader_result()
         if res is None:
             try:
-                sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/stt/scripts'))
                 from stt import transcribe
                 res = transcribe(AUDIO_FILE, model_size="turbo", language=language, beam_size=5)
             except Exception as transcribe_err:
@@ -229,12 +266,31 @@ def stop_and_transcribe():
             notify(f"Error o silencio: {res.get('error', 'Audio vacio')}", "dialog-error", 3000)
             return
 
-        # 2. Análisis de intención con Gemini Flash
+        log_history(raw_text=raw_text, refined_text="", is_cmd=False, mode=mode_key)
+
+        # 2. Modo raw: bypass Gemini, pegar directamente
+        if mode_key == "raw":
+            final_text = raw_text
+            if append_mode:
+                existing = subprocess.run(['wl-paste'], capture_output=True, text=True).stdout.rstrip()
+                if existing:
+                    final_text = existing + " " + final_text
+            if not _copy_to_clipboard(final_text):
+                notify("Error al copiar al portapapeles", "dialog-error", 3000)
+                return
+            simulate_paste()
+            notify(f"Texto insertado [Raw]", "emblem-default", 2000)
+            return
+
+        # 3. Análisis de intención con Gemini
+        from shared_config import call_gemini_structured
+
         vocab_hint = (
             f" Vocabulario específico del usuario (respetar exactamente): {', '.join(vocabulary)}."
             if vocabulary else ""
         )
         mode_hint = f" {mode_prompt}" if mode_prompt else ""
+        is_vault = mode_key == "vault"
 
         schema = {
             "type": "OBJECT",
@@ -254,7 +310,7 @@ def stop_and_transcribe():
                 "refined_text": {
                     "type": "STRING",
                     "description": (
-                        f"Si is_command=false, texto final para pegar. Corrige errores fonéticos de Whisper y nombres propios "
+                        f"Si is_command=false, texto final. Corrige errores fonéticos de Whisper y nombres propios "
                         f"(Watson, Sherlock, Claude, TheIA, Entel, SuperDictate).{vocab_hint} "
                         f"Si el usuario enumera elementos, formatea como lista con saltos de línea reales.{mode_hint}"
                     )
@@ -263,11 +319,17 @@ def stop_and_transcribe():
             "required": ["is_command"]
         }
 
+        if is_vault:
+            schema["properties"]["note_title"] = {
+                "type": "STRING",
+                "description": "Título breve y descriptivo para la nota de Obsidian (máx 60 caracteres)."
+            }
+
         prompt_llm = (
             f"Eres el cerebro de SuperDictate. Decide si el texto es un dictado pasivo o una orden activa.\n"
             f"Si el usuario pide a la máquina que haga algo (\"Abre el vault\", \"busca en mis notas X\", "
             f"\"recuérdame Y\", \"dile a Sherlock Z\"), marca is_command=true.\n"
-            f"Si es texto para pegar, marca is_command=false.\n\n"
+            f"Si es texto para pegar o guardar, marca is_command=false.\n\n"
             f"Texto dictado (puede tener errores fonéticos de Whisper): \"{raw_text}\""
         )
 
@@ -285,7 +347,7 @@ def stop_and_transcribe():
             cmd_args=res_json.get("command_args")
         )
 
-        # 3. Ejecución
+        # 4. Ejecución
         if res_json.get("is_command"):
             cmd = res_json.get("command_type")
             arg = res_json.get("command_args", "")
@@ -305,13 +367,11 @@ def stop_and_transcribe():
                 notify(f"Buscando en tus notas:\n{arg}", "emblem-default", 4000)
                 sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/obsidian-qa/scripts'))
                 from vault_qa import ask_sources
-
                 try:
                     ans = ask_sources(arg, sources=['vault', 'personal'], top_k=3)
                     answer_text = ans.get('answer', 'No encontre nada relevante.') if isinstance(ans, dict) else str(ans)
                 except Exception as rag_err:
                     answer_text = f"Error en busqueda RAG: {rag_err}"
-
                 try:
                     subprocess.Popen(['zenity', '--info',
                                       '--title', f'Resultados: {arg}',
@@ -348,9 +408,27 @@ def stop_and_transcribe():
         else:
             final_text = res_json.get("refined_text", raw_text)
 
-            proc = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
-            proc.communicate(final_text.encode("utf-8"))
-            if proc.returncode != 0:
+            # Modo vault: guardar en Obsidian
+            if is_vault:
+                sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/obsidian-capture/scripts'))
+                try:
+                    from capture import capture_note
+                    ts = datetime.now().strftime("%Y%m%d%H%M")
+                    title = res_json.get("note_title") or f"Nota de voz {ts}"
+                    full_title = f"{ts} - {title}"
+                    capture_note(full_title, final_text, tags=['unique', 'voice-note'])
+                    notify(f"Nota guardada:\n{title}", "emblem-default", 3000)
+                except Exception as vault_err:
+                    notify(f"Error guardando en vault: {vault_err}", "dialog-error", 4000)
+                return
+
+            # Modo paste normal (con append opcional)
+            if append_mode:
+                existing = subprocess.run(['wl-paste'], capture_output=True, text=True).stdout.rstrip()
+                if existing:
+                    final_text = existing + " " + final_text
+
+            if not _copy_to_clipboard(final_text):
                 notify("Error al copiar al portapapeles", "dialog-error", 3000)
                 return
 
@@ -361,28 +439,42 @@ def stop_and_transcribe():
         notify(f"Falla del sistema: {err}", "dialog-error", 5000)
 
 
-def start_recording(mode_override=None):
+def start_recording(mode_override=None, append=False):
     config = load_config()
     mode_key = mode_override or config.get("default_mode", "default")
     language = config.get("language", "es")
+    silence_timeout = config.get("silence_timeout")
 
-    # Persistir para la fase de stop
     with open(MODE_FILE, 'w') as f:
         f.write(mode_key)
     with open(LANG_FILE, 'w') as f:
         f.write(language)
+    if append:
+        open(APPEND_FILE, 'w').close()
 
-    # Limpiar archivos residuales de sesiones anteriores
-    for f in (RESULT_FILE, READY_FILE, MODEL_READY):
+    for path in (RESULT_FILE, READY_FILE, MODEL_READY):
         try:
-            os.remove(f)
+            os.remove(path)
         except FileNotFoundError:
             pass
 
-    proc = subprocess.Popen(
-        ["arecord", "-D", "default", "-f", "S16_LE", "-c", "1", "-r", "16000", AUDIO_FILE],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+    if silence_timeout:
+        proc = subprocess.Popen(
+            ["sox", "-t", "alsa", "default", "-r", "16000", "-c", "1", "-b", "16", AUDIO_FILE,
+             "silence", "1", "0.1", "1%", "1", str(float(silence_timeout)), "1%"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        watcher_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "silence_watcher.py")
+        subprocess.Popen(
+            [sys.executable, watcher_path, str(proc.pid), os.path.realpath(__file__)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+    else:
+        proc = subprocess.Popen(
+            ["arecord", "-D", "default", "-f", "S16_LE", "-c", "1", "-r", "16000", AUDIO_FILE],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+
     with open(PID_FILE, "w") as f:
         f.write(str(proc.pid))
 
@@ -396,16 +488,25 @@ def start_recording(mode_override=None):
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     mode_name = config.get("modes", {}).get(mode_key, {}).get("name", mode_key)
-    notify(f"Escuchando... [{mode_name}]", "media-record", 10000)
+    suffix = " [+append]" if append else ""
+    auto_suffix = " [auto-stop]" if silence_timeout else ""
+    notify(f"Escuchando... [{mode_name}]{suffix}{auto_suffix}", "media-record", 10000)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default=None, help="Modo de dictado (default, email, chat, formal, notes)")
+    parser.add_argument("--mode", default=None,
+                        help="Modo de dictado: default, raw, email, chat, formal, notes, vault")
+    parser.add_argument("--append", action="store_true",
+                        help="Agregar el texto al portapapeles existente en vez de reemplazarlo")
+    parser.add_argument("--history", nargs="?", const=10, type=int, metavar="N",
+                        help="Mostrar las últimas N entradas del historial (default: 10)")
     args = parser.parse_args()
 
-    if os.path.exists(PID_FILE):
+    if args.history is not None:
+        show_history(args.history)
+    elif os.path.exists(PID_FILE):
         stop_and_transcribe()
     else:
-        os.system("killall arecord 2>/dev/null")
-        start_recording(mode_override=args.mode)
+        os.system("killall arecord 2>/dev/null; pkill -f 'sox.*alsa' 2>/dev/null")
+        start_recording(mode_override=args.mode, append=args.append)

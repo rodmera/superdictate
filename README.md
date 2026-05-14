@@ -18,6 +18,12 @@ SuperDictate is a Linux-native, Wayland-compatible smart dictation tool. It uses
 ## Features
 - **Smart Dictation:** Trigger and talk. It fixes phonetic Whisper errors and your custom vocabulary.
 - **Modes:** Different prompts for different contexts — email, chat, formal, notes, or fully custom.
+- **Raw mode (`--mode raw`):** Bypass Gemini entirely, paste Whisper output directly for maximum speed.
+- **Vault mode (`--mode vault`):** Save transcription as an Obsidian note instead of pasting. Gemini generates the note title automatically.
+- **Append (`--append`):** Add new text to the existing clipboard content instead of replacing it.
+- **Auto-stop by silence:** Set `silence_timeout` in config and the recording stops automatically — no second keypress needed.
+- **Push-to-talk (`ptt.py`):** Hold a key to record, release to transcribe. Runs as a background daemon.
+- **History (`--history [N]`):** Browse the last N transcriptions from the terminal.
 - **Custom Vocabulary:** Define your own terms (names, acronyms, brands) in the config file.
 - **Multi-language:** Set any language supported by Whisper in the config file.
 - **Project Navigation:** *"Abre el proyecto CreaEfecto"*
@@ -77,5 +83,26 @@ To use a specific mode, pass `--mode` when binding the shortcut:
 ```bash
 super-dictate --mode email
 super-dictate --mode chat
-super-dictate --mode formal
+super-dictate --mode raw      # fastest: no Gemini call
+super-dictate --mode vault    # saves to Obsidian instead of pasting
+super-dictate --append        # appends to existing clipboard content
+super-dictate --history       # show last 10 transcriptions
+super-dictate --history 25    # show last 25
+```
+
+### Push-to-talk
+
+Run `ptt.py` as a startup daemon. It monitors a key (default: `F9`, configurable via `ptt_key` in the config) and starts/stops recording on press/release:
+
+```bash
+python3 ptt.py
+python3 ptt.py --key KEY_RIGHTCTRL
+```
+
+### Auto-stop by silence
+
+Set `silence_timeout` in the config (seconds). Recording stops automatically after that duration of silence — no second keypress needed. Requires `sox`:
+
+```json
+{ "silence_timeout": 2.0 }
 ```

@@ -1,0 +1,31 @@
+#!/usr/bin/env python3
+"""Espera a que sox termine (silencio detectado) y dispara la transcripción automáticamente."""
+import os
+import sys
+import subprocess
+import time
+
+PID_FILE = "/tmp/super-dictate.pid"
+
+
+def main():
+    if len(sys.argv) < 3:
+        return
+    sox_pid = int(sys.argv[1])
+    script_path = sys.argv[2]
+
+    # Esperar que sox termine (silencio detectado o SIGINT manual)
+    while True:
+        try:
+            os.kill(sox_pid, 0)
+            time.sleep(0.1)
+        except ProcessLookupError:
+            break
+
+    # Disparar stop solo si aún estamos en modo grabación
+    if os.path.exists(PID_FILE):
+        subprocess.run([sys.executable, script_path])
+
+
+if __name__ == '__main__':
+    main()
