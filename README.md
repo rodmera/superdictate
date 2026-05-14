@@ -19,7 +19,7 @@ SuperDictate is a Linux-native, Wayland-compatible smart dictation tool. It uses
 - **Smart Dictation:** Trigger and talk. It fixes bad Whisper transcriptions like "Watson" or "CreaEfecto".
 - **Project Navigation:** *"Abre el proyecto CreaEfecto"*
 - **Obsidian Vault:** *"Abre el vault"*
-- **RAG Search:** *"Busca en mis notas sobre TheIA"* (Uses the `vault_qa` RAG pipeline and shows a Zenity popup with the AI's answer).
+- **RAG Search:** *"Busca en mis notas sobre TheIA"* (Uses the `ask_sources` RAG pipeline across Obsidian vault + personal documents, shows a Zenity popup with the AI's answer).
 - **Todoist Tasks:** *"Recuérdame llamar a cliente mañana"*
 - **OpenClaw (Sherlock):** *"Dile a Sherlock que revise mi correo"*
 

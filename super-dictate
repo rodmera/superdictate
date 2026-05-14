@@ -133,8 +133,9 @@ Si es solo una frase suelta ("hola cómo estás", "este es un texto de prueba"),
 
 Texto dictado (con posibles errores fonéticos de Whisper): "{raw_text}" """
 
-        res_json = call_gemini_structured(prompt_llm, schema, model="gemini-3-flash-preview", temperature=0.1)
-        
+        res_json = call_gemini_structured(prompt_llm, schema, model="gemini-3-flash-preview",
+                                          temperature=0.1, timeout=45)
+
         if not res_json:
             raise Exception("Falla en API Gemini")
             
@@ -164,10 +165,10 @@ Texto dictado (con posibles errores fonéticos de Whisper): "{raw_text}" """
             elif cmd == "search_vault":
                 notify(f"🔍 Buscando en tus notas:\n{arg}", "emblem-default", 4000)
                 sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/obsidian-qa/scripts'))
-                from vault_qa import ask_vault
-                
-                # Ejecutar RAG sobre el vault
-                ans = ask_vault(arg, top_k=3)
+                from vault_qa import ask_sources
+
+                # Busca en vault + personal (salud, docs, etc.)
+                ans = ask_sources(arg, sources=['vault', 'personal'], top_k=3)
                 answer_text = ans.get('answer', 'No encontré nada relevante.')
                 
                 # En Linux, las notificaciones muy largas se cortan, usamos un popup gráfico ligero (zenity)
