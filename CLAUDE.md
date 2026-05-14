@@ -1,0 +1,41 @@
+# SuperDictate — Notas para Claude Code
+
+## Port a macOS (pendiente)
+
+El core (Whisper, pre-loader, Gemini) es multiplataforma y no necesita cambios.
+Solo hay que reemplazar 5 dependencias Linux-específicas:
+
+| Componente | Linux | macOS |
+|---|---|---|
+| Grabación | `arecord` | `sounddevice` + `soundfile` (Python) o `sox rec` |
+| Paste | `evdev` / `UInput` | `pyautogui` (Quartz, funciona directo) |
+| Portapapeles | `wl-copy` | `pbcopy` |
+| Notificaciones | `notify-send` | `osascript -e 'display notification...'` |
+| Abrir apps/archivos | `xdg-open` | `open` |
+| Diálogo RAG | `zenity` | `osascript` AppleScript dialog |
+
+**Approach recomendado:** abstraer las 5 funciones en `platform_utils.py` con
+implementaciones `linux` / `macos`. El script `super-dictate` principal no
+necesita cambios estructurales.
+
+**No reescribir en Swift.** Python en macOS tiene soporte nativo completo.
+Swift solo tendría sentido para distribución en Mac App Store, lo que implicaría
+sandboxing y haría el keystroke injection más difícil.
+
+**Esfuerzo estimado:** 2-3 horas.
+
+## Arquitectura — Pre-loader
+
+- `preloader.py` corre en background desde la primera pulsación
+- Carga WhisperModel turbo (~3.7s) mientras el usuario habla
+- Señaliza vía `/tmp/super-dictate-audio-ready` al parar la grabación
+- Latencia post-segunda-pulsación: ~10s (vs ~14s sin pre-loader)
+- Bottleneck restante: inferencia CPU ~5.4s (irreducible sin GPU/modelo más pequeño)
+
+## Paste en Linux/Wayland
+
+Se usa `evdev`/`UInput` (Ctrl+Shift+V) porque en GNOME Wayland no hay
+alternativa universal:
+- `wtype` requiere protocolo wlroots (no disponible en GNOME)
+- `ydotool` versión repos Ubuntu no soporta Unicode sin daemon
+- `gdbus Shell.Eval` deshabilitado en GNOME moderno
