@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import re
 import sys
 import subprocess
 import time
@@ -10,12 +11,17 @@ from datetime import datetime
 try:
     import evdev
     from evdev import UInput, ecodes as e
+    EVDEV_AVAILABLE = True
 except ImportError:
-    pass
+    EVDEV_AVAILABLE = False
 
 PID_FILE = "/tmp/super-dictate.pid"
 AUDIO_FILE = "/tmp/super-dictate-audio.wav"
 HISTORY_FILE = os.path.expanduser("~/.openclaw/workspace/memory/superdictate-history.jsonl")
+
+# Fix #3: crear directorio del historial si no existe
+os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
+
 
 def log_history(raw_text, refined_text, is_cmd, cmd_type=None, cmd_args=None):
     try:
@@ -32,84 +38,110 @@ def log_history(raw_text, refined_text, is_cmd, cmd_type=None, cmd_args=None):
     except Exception:
         pass
 
+
 def notify(msg, icon="audio-input-microphone", expire=2000):
     subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "SuperDictate", msg])
 
+
 def simulate_paste():
-    """Simula Ctrl+V usando un teclado virtual a nivel de kernel"""
+    """Simula Ctrl+Shift+V via teclado virtual a nivel de kernel (funciona en terminales)."""
+    # Fix #1: fallar con mensaje claro si evdev no está instalado
+    if not EVDEV_AVAILABLE:
+        notify("evdev no instalado. Ejecuta: pip install evdev", "dialog-error", 5000)
+        return
     try:
         ui = UInput()
-        time.sleep(0.5) # Dar tiempo al SO para registrar el dispositivo
-        
-        # Press Left Ctrl
-        ui.write(e.EV_KEY, e.KEY_LEFTCTRL, 1)
-        ui.syn()
-        time.sleep(0.05)
-        
-        # Press Shift (para la terminal a veces es Ctrl+Shift+V)
-        ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1)
-        ui.syn()
-        time.sleep(0.05)
-        
-        # Press V
-        ui.write(e.EV_KEY, e.KEY_V, 1)
-        ui.syn()
-        time.sleep(0.05)
-        
-        # Release V
-        ui.write(e.EV_KEY, e.KEY_V, 0)
-        ui.syn()
-        time.sleep(0.05)
-        
-        # Release Shift
-        ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0)
-        ui.syn()
-        
-        # Release Left Ctrl
-        ui.write(e.EV_KEY, e.KEY_LEFTCTRL, 0)
-        ui.syn()
-        
+        time.sleep(0.5)  # tiempo para que el SO registre el dispositivo
+
+        ui.write(e.EV_KEY, e.KEY_LEFTCTRL, 1);  ui.syn(); time.sleep(0.05)
+        ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1); ui.syn(); time.sleep(0.05)
+        ui.write(e.EV_KEY, e.KEY_V, 1);         ui.syn(); time.sleep(0.05)
+        ui.write(e.EV_KEY, e.KEY_V, 0);         ui.syn(); time.sleep(0.05)
+        ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 0); ui.syn()
+        ui.write(e.EV_KEY, e.KEY_LEFTCTRL, 0);  ui.syn()
+
         time.sleep(0.1)
         ui.close()
     except Exception as ex:
-        notify(f"❌ Error simulando pegado: {ex}", "dialog-error", 5000)
+        notify(f"Error simulando pegado: {ex}", "dialog-error", 5000)
+
+
+def _find_project(arg, projects_dir):
+    """Fix #7: matching por tokens en vez de substring libre.
+
+    Tokeniza por espacios/guiones/underscores. Requiere mínimo 3 chars por token
+    y que el token sea exacto o (si >= 4 chars) sea prefijo de un token de la carpeta.
+    Evita que "the" matchee "theia", "leather", etc.
+    """
+    arg_tokens = [t for t in re.split(r'[\s\-_]+', arg.lower()) if len(t) >= 3]
+    if not arg_tokens:
+        return None
+    for folder in sorted(os.listdir(projects_dir), key=len):
+        full_path = os.path.join(projects_dir, folder)
+        if not os.path.isdir(full_path):
+            continue
+        folder_tokens = re.split(r'[\s\-_]+', folder.lower())
+        for at in arg_tokens:
+            for ft in folder_tokens:
+                # Exacto, o prefijo de al menos 4 chars
+                if at == ft or (len(at) >= 4 and ft.startswith(at)):
+                    return folder
+    return None
+
 
 def stop_and_transcribe():
+    # Fix #2: limpiar PID en finally para evitar archivos huérfanos
+    pid = None
     try:
         with open(PID_FILE, "r") as f:
             pid = int(f.read().strip())
-        os.remove(PID_FILE)
-        os.kill(pid, signal.SIGINT)
-        # Matar el icono del panel
-        os.system("pkill -f 'indicator.py'")
-        time.sleep(0.2)
     except Exception:
         pass
-    
-    notify("⏳ Procesando...", "view-refresh", 5000)
-    
+    finally:
+        try:
+            os.remove(PID_FILE)
+        except FileNotFoundError:
+            pass
+
+    if pid:
+        try:
+            os.kill(pid, 0)   # verifica que el proceso existe antes de matar
+            os.kill(pid, signal.SIGINT)
+        except ProcessLookupError:
+            pass  # ya terminó
+
+    os.system("pkill -f 'indicator.py'")
+    time.sleep(0.2)
+
+    notify("Procesando...", "view-refresh", 5000)
+
     sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/stt/scripts'))
     sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills'))
-    
+
     try:
         from stt import transcribe
         from shared_config import call_gemini_structured
-        
-        # 1. Transcripción cruda rápida con Whisper local
-        res = transcribe(AUDIO_FILE, model_size="turbo", language="es", beam_size=5)
-        raw_text = res.get("text", "")
-        
-        if not raw_text or "error" in res:
-            notify(f"❌ Error o silencio: {res.get('error', 'Audio vacío')}", "dialog-error", 3000)
+
+        # 1. Transcripción local con Whisper
+        # Fix #5: capturar excepciones de transcribe() con mensaje al usuario
+        try:
+            res = transcribe(AUDIO_FILE, model_size="turbo", language="es", beam_size=5)
+        except Exception as transcribe_err:
+            notify(f"Error en transcripcion: {transcribe_err}", "dialog-error", 4000)
             return
-            
-        # 2. Análisis de Intención (Enrutamiento) con Gemini Flash
+
+        raw_text = res.get("text", "")
+        if not raw_text or "error" in res:
+            notify(f"Error o silencio: {res.get('error', 'Audio vacio')}", "dialog-error", 3000)
+            return
+
+        # 2. Análisis de intención con Gemini Flash
         schema = {
             "type": "OBJECT",
             "properties": {
                 "is_command": {
                     "type": "BOOLEAN",
-                    "description": "¿El usuario está dando una orden al computador (ej. 'abre X', 'recuérdame Y', 'dile a Sherlock Z')?"
+                    "description": "El usuario da una orden al computador (ej. 'abre X', 'recuérdame Y', 'dile a Sherlock Z')?"
                 },
                 "command_type": {
                     "type": "STRING",
@@ -117,28 +149,27 @@ def stop_and_transcribe():
                 },
                 "command_args": {
                     "type": "STRING",
-                    "description": "Argumento de la orden (ej: nombre del proyecto 'theia-landing', nombre de la tarea, o el mensaje para sherlock)."
+                    "description": "Argumento de la orden (nombre del proyecto, tarea, o mensaje para Sherlock)."
                 },
                 "refined_text": {
                     "type": "STRING",
-                    "description": "Si is_command=false, este es el texto final para pegar. Corrige posibles malas transcripciones fonéticas basándote en la gramática. Corrige ecosistema (Watson, Sherlock, Claude, TheIA, Entel, SuperDictate). IMPORTANTE: Si el usuario enumera elementos (ej. 'uno comprar leche, dos huevos', 'primero esto, segundo esto'), formatea el texto automáticamente como una lista con viñetas o lista numerada, usando saltos de línea reales."
+                    "description": "Si is_command=false, texto final para pegar. Corrige errores fonéticos de Whisper y nombres propios (Watson, Sherlock, Claude, TheIA, Entel, SuperDictate). Si el usuario enumera elementos, formatea como lista con saltos de línea reales."
                 }
             },
             "required": ["is_command"]
         }
 
-        prompt_llm = f"""Eres el cerebro de SuperDictate. Analiza lo que el usuario acaba de decir por micrófono y decide si es un dictado de texto pasivo, o una orden/comando activo para ejecutar en el computador.
-Si la intención del usuario es pedirle a la máquina que haga algo (como "Abre el vault", "busca en mis notas X", "recuérdame hacer y", "dile a sherlock que z"), DEBES marcar is_command=true.
-Si es solo una frase suelta ("hola cómo estás", "este es un texto de prueba"), DEBES marcar is_command=false.
+        prompt_llm = f"""Eres el cerebro de SuperDictate. Decide si el texto es un dictado pasivo o una orden activa.
+Si el usuario pide a la máquina que haga algo ("Abre el vault", "busca en mis notas X", "recuérdame Y", "dile a Sherlock Z"), marca is_command=true.
+Si es texto para pegar ("hola cómo estás", "este es un texto de prueba"), marca is_command=false.
 
-Texto dictado (con posibles errores fonéticos de Whisper): "{raw_text}" """
+Texto dictado (puede tener errores fonéticos de Whisper): "{raw_text}" """
 
         res_json = call_gemini_structured(prompt_llm, schema, model="gemini-3-flash-preview",
                                           temperature=0.1, timeout=45)
-
         if not res_json:
             raise Exception("Falla en API Gemini")
-            
+
         log_history(
             raw_text=raw_text,
             refined_text=res_json.get("refined_text", ""),
@@ -146,94 +177,102 @@ Texto dictado (con posibles errores fonéticos de Whisper): "{raw_text}" """
             cmd_type=res_json.get("command_type"),
             cmd_args=res_json.get("command_args")
         )
-            
+
         # 3. Ejecución
         if res_json.get("is_command"):
             cmd = res_json.get("command_type")
             arg = res_json.get("command_args", "")
-            
+
             if cmd == "open_vault":
-                subprocess.Popen(["xdg-open", "obsidian://open"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                notify("📖 Abriendo Vault...", "emblem-default")
-                
+                subprocess.Popen(["xdg-open", "obsidian://open"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                notify("Abriendo Vault...", "emblem-default")
+
             elif cmd == "add_todo":
                 sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/todoist/scripts'))
                 from todoist import add_task
                 add_task(arg, due_string="today", project_name="Inbox")
-                notify(f"✅ Tarea añadida a Todoist:\n{arg}", "emblem-default", 4000)
-                
+                notify(f"Tarea anadida a Todoist:\n{arg}", "emblem-default", 4000)
+
             elif cmd == "search_vault":
-                notify(f"🔍 Buscando en tus notas:\n{arg}", "emblem-default", 4000)
+                notify(f"Buscando en tus notas:\n{arg}", "emblem-default", 4000)
                 sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/obsidian-qa/scripts'))
                 from vault_qa import ask_sources
 
-                # Busca en vault + personal (salud, docs, etc.)
-                ans = ask_sources(arg, sources=['vault', 'personal'], top_k=3)
-                answer_text = ans.get('answer', 'No encontré nada relevante.')
-                
-                # En Linux, las notificaciones muy largas se cortan, usamos un popup gráfico ligero (zenity)
-                # O si no está zenity, guardamos en archivo temporal y abrimos en editor
+                # Fix #8 (ask_sources): validar respuesta antes de usar
                 try:
-                    # Envolver zenity para que no bloquee el script
-                    subprocess.Popen(['zenity', '--info', '--title', f'Resultados: {arg}', '--text', answer_text, '--width=600', '--height=400'])
+                    ans = ask_sources(arg, sources=['vault', 'personal'], top_k=3)
+                    answer_text = ans.get('answer', 'No encontre nada relevante.') if isinstance(ans, dict) else str(ans)
+                except Exception as rag_err:
+                    answer_text = f"Error en busqueda RAG: {rag_err}"
+
+                try:
+                    subprocess.Popen(['zenity', '--info',
+                                      '--title', f'Resultados: {arg}',
+                                      '--text', answer_text,
+                                      '--width=600', '--height=400'])
                 except FileNotFoundError:
-                    # Fallback si no tiene zenity
-                    tmp_ans = f"/tmp/vault_ans_{int(time.time())}.txt"
-                    with open(tmp_ans, "w") as f:
-                        f.write(f"Búsqueda: {arg}\n\n{answer_text}")
+                    # Fix #6: nombre fijo en /tmp, se sobreescribe en cada uso
+                    tmp_ans = "/tmp/superdictate-vault-answer.txt"
+                    with open(tmp_ans, "w") as fh:
+                        fh.write(f"Busqueda: {arg}\n\n{answer_text}")
                     subprocess.Popen(["xdg-open", tmp_ans])
-                
+
             elif cmd == "ask_sherlock":
-                subprocess.Popen([
-                    "openclaw", "agent", "--to", "+56977298344", "--message", arg
-                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                notify(f"🕵️ Mensaje enviado a Sherlock:\n{arg}", "emblem-default", 4000)
-                
+                subprocess.Popen(
+                    ["openclaw", "agent", "--to", "+56977298344", "--message", arg],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+                )
+                notify(f"Mensaje enviado a Sherlock:\n{arg}", "emblem-default", 4000)
+
             elif cmd == "open_project":
                 projects_dir = os.path.expanduser("~/projects")
-                found = False
-                for p in sorted(os.listdir(projects_dir), key=len): # Buscar match más corto primero para evitar falsos positivos largos
-                    # Buscamos si la palabra clave está en el nombre de la carpeta
-                    arg_clean = arg.lower().replace(" ", "").replace("-", "")
-                    p_clean = p.lower().replace("-", "")
-                    if arg_clean and arg_clean in p_clean:
-                        subprocess.Popen(["xdg-open", os.path.join(projects_dir, p)], 
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, 
-                                         start_new_session=True)
-                        notify(f"📂 Proyecto abierto: {p}", "emblem-default")
-                        found = True
-                        break
-                if not found:
-                    notify(f"❌ Proyecto no encontrado: {arg}", "dialog-error")
+                # Fix #7: matching por tokens, no por substring
+                folder = _find_project(arg, projects_dir)
+                if folder:
+                    subprocess.Popen(
+                        ["xdg-open", os.path.join(projects_dir, folder)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        start_new_session=True
+                    )
+                    notify(f"Proyecto abierto: {folder}", "emblem-default")
+                else:
+                    notify(f"Proyecto no encontrado: {arg}", "dialog-error")
             else:
-                notify(f"❓ Comando no reconocido: {cmd}", "dialog-warning")
+                notify(f"Comando no reconocido: {cmd}", "dialog-warning")
+
         else:
-            # Flujo normal de dictado
+            # Dictado pasivo: copiar al portapapeles y pegar
             final_text = res_json.get("refined_text", raw_text)
-            
+
+            # Fix #4: verificar que wl-copy funcionó antes de intentar pegar
             proc = subprocess.Popen(["wl-copy"], stdin=subprocess.PIPE)
             proc.communicate(final_text.encode("utf-8"))
-            
+            if proc.returncode != 0:
+                notify("Error al copiar al portapapeles", "dialog-error", 3000)
+                return
+
             simulate_paste()
-            notify(f"✅ Texto insertado", "emblem-default", 2000)
-            
-    except Exception as e:
-        notify(f"❌ Falla del sistema: {e}", "dialog-error")
+            notify("Texto insertado", "emblem-default", 2000)
+
+    except Exception as err:
+        notify(f"Falla del sistema: {err}", "dialog-error", 5000)
+
 
 def start_recording():
-    # 1. Iniciar grabacion
     proc = subprocess.Popen(
         ["arecord", "-D", "default", "-f", "S16_LE", "-c", "1", "-r", "16000", AUDIO_FILE],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     with open(PID_FILE, "w") as f:
         f.write(str(proc.pid))
-        
-    # 2. Iniciar el icono del panel superior
+
     indicator_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "indicator.py")
-    subprocess.Popen([sys.executable, indicator_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    notify("🔴 Escuchando...", "media-record", 10000)
+    subprocess.Popen([sys.executable, indicator_path],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    notify("Escuchando...", "media-record", 10000)
+
 
 if __name__ == "__main__":
     if os.path.exists(PID_FILE):
