@@ -47,6 +47,8 @@ On first run, a config file is created at `~/.config/superdictate/config.json`:
 
 You can add your own modes or edit the prompts freely. Use `--mode <name>` to activate a specific mode, or set `default_mode` in the config.
 
+The config file is created automatically with defaults on the first run of `super-dictate`.
+
 ## Architecture
 
 ```
